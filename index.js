@@ -14,7 +14,6 @@ const EGGS_ENDPOINT =
   process.env.EGGS_ENDPOINT || "/eggs?sort=price&order=desc&limit=100";
 
 const POST_INTERVAL_MINUTES = Number(process.env.POST_INTERVAL_MINUTES || 5);
-
 const PREFIX = "!";
 
 if (!TOKEN) throw new Error("Missing DISCORD_TOKEN in .env");
@@ -28,9 +27,11 @@ const client = new Client({
   ]
 });
 
-// ---------- helpers ----------
-async function fetchEggs() {
+// ---------------- HELPERS ----------------
+
+async function fetchAPI() {
   const url = `${API_BASE}${EGGS_ENDPOINT}`;
+
   const res = await fetch(url, {
     headers: { Accept: "application/json" }
   });
@@ -40,21 +41,42 @@ async function fetchEggs() {
   return await res.json();
 }
 
-function normalize(s) {
-  return String(s || "")
+function extractItems(data) {
+  // Handles multiple API response formats
+  if (Array.isArray(data)) return data;
+
+  if (data?.data && Array.isArray(data.data)) return data.data;
+  if (data?.items && Array.isArray(data.items)) return data.items;
+  if (data?.eggs && Array.isArray(data.eggs)) return data.eggs;
+  if (data?.result && Array.isArray(data.result)) return data.result;
+  if (data?.results && Array.isArray(data.results)) return data.results;
+
+  return [];
+}
+
+function normalize(str) {
+  return String(str || "")
     .toLowerCase()
+    .replace(/[^a-z0-9 ]/g, "")
     .replace(/\s+/g, " ")
     .trim();
 }
 
 function formatNumber(n) {
   const x = Number(n);
-  if (Number.isNaN(x)) return String(n ?? "N/A");
+  if (Number.isNaN(x)) return "N/A";
   return x.toLocaleString("en-US");
 }
 
 function pickName(item) {
-  return item?.name || item?.title || item?.petName || item?.eggName || "Unknown";
+  return (
+    item?.name ||
+    item?.petName ||
+    item?.eggName ||
+    item?.title ||
+    item?.displayName ||
+    "Unknown"
+  );
 }
 
 function pickPrice(item) {
@@ -62,57 +84,49 @@ function pickPrice(item) {
     item?.price ??
     item?.value ??
     item?.tokens ??
-    item?.cost ??
-    item?.tokenCost ??
+    item?.token ??
+    item?.tokenValue ??
+    item?.token_value ??
     item?.token_price ??
+    item?.cost ??
+    item?.amount ??
+    item?.worth ??
     null
   );
 }
 
-function buildHatchesEmbed(items, title = "Tap Sim — Eggs / Hatches") {
-  const embed = new EmbedBuilder()
-    .setTitle(title)
-    .setDescription(`Source: tapsim.gg`)
-    .setTimestamp(new Date());
-
-  const top = items.slice(0, 10);
-
-  const lines = top.map((it, idx) => {
-    const name = pickName(it);
-    const price = pickPrice(it);
-    const priceText =
-      price != null
-        ? `${formatNumber(price)} ${TOKEN_EMOJI}`
-        : `N/A ${TOKEN_EMOJI}`;
-
-    return `**${idx + 1}. ${name}** — ${priceText}`;
+function sortByPrice(items) {
+  return items.sort((a, b) => {
+    const pa = Number(pickPrice(a)) || 0;
+    const pb = Number(pickPrice(b)) || 0;
+    return pb - pa;
   });
-
-  embed.addFields({
-    name: "Top (by price)",
-    value: lines.join("\n") || "No data",
-    inline: false
-  });
-
-  return embed;
 }
 
 function fuzzyFind(items, query) {
   const q = normalize(query);
+
   if (!q) return [];
 
+  // exact match
   const exact = items.filter(it => normalize(pickName(it)) === q);
   if (exact.length) return exact;
 
+  // contains match
   const contains = items.filter(it => normalize(pickName(it)).includes(q));
   if (contains.length) return contains;
 
-  const qParts = q.split(" ");
+  // scoring match
+  const parts = q.split(" ");
   const scored = items
     .map(it => {
       const name = normalize(pickName(it));
       let score = 0;
-      for (const p of qParts) if (name.includes(p)) score++;
+
+      for (const p of parts) {
+        if (name.includes(p)) score++;
+      }
+
       return { it, score };
     })
     .filter(x => x.score > 0)
@@ -121,39 +135,72 @@ function fuzzyFind(items, query) {
   return scored.slice(0, 10).map(x => x.it);
 }
 
-// ---------- auto posting ----------
-let lastPostHash = "";
+function buildTopEmbed(items, title) {
+  const sorted = sortByPrice(items).slice(0, 10);
 
-function hashTop(items) {
+  const embed = new EmbedBuilder()
+    .setTitle(title)
+    .setDescription("Source: tapsim.gg")
+    .setTimestamp(new Date());
+
+  if (!sorted.length) {
+    embed.addFields({ name: "Top (by price)", value: "No data", inline: false });
+    return embed;
+  }
+
+  const lines = sorted.map((it, i) => {
+    const name = pickName(it);
+    const price = pickPrice(it);
+
+    return `**${i + 1}. ${name}** — **${formatNumber(price)}** ${TOKEN_EMOJI}`;
+  });
+
+  embed.addFields({
+    name: "Top (by price)",
+    value: lines.join("\n"),
+    inline: false
+  });
+
+  return embed;
+}
+
+// ---------------- AUTO POST ----------------
+
+let lastHash = "";
+
+function createHash(items) {
   return items
     .slice(0, 10)
     .map(it => `${pickName(it)}:${pickPrice(it)}`)
     .join("|");
 }
 
-async function postHatchesIfChanged() {
+async function autoPostHatches() {
   try {
-    const data = await fetchEggs();
-    const items = Array.isArray(data) ? data : (data?.data ?? data?.items ?? []);
+    const data = await fetchAPI();
+    const items = extractItems(data);
 
-    if (!Array.isArray(items) || items.length === 0) return;
+    if (!items.length) return;
 
-    const newHash = hashTop(items);
-    if (newHash === lastPostHash) return;
+    const sorted = sortByPrice(items);
+    const newHash = createHash(sorted);
+
+    if (newHash === lastHash) return;
 
     const channel = await client.channels.fetch(HATCHES_CHANNEL_ID);
-    if (!channel?.isTextBased?.()) return;
+    if (!channel || !channel.isTextBased()) return;
 
-    const embed = buildHatchesEmbed(items, "Tap Sim — Hatch Update");
+    const embed = buildTopEmbed(items, "Tap Sim — Hatch Update");
     await channel.send({ embeds: [embed] });
 
-    lastPostHash = newHash;
+    lastHash = newHash;
   } catch (err) {
     console.error("Auto-post error:", err?.message || err);
   }
 }
 
-// ---------- prefix commands ----------
+// ---------------- COMMANDS ----------------
+
 client.on("messageCreate", async (message) => {
   if (message.author.bot) return;
   if (!message.content.startsWith(PREFIX)) return;
@@ -162,32 +209,48 @@ client.on("messageCreate", async (message) => {
   const cmd = args.shift()?.toLowerCase();
 
   try {
-    // !hatches
+    // HELP
+    if (cmd === "help") {
+      return message.reply(
+        "**Commands:**\n" +
+        "`!hatches` - show eggs/hatches\n" +
+        "`!value <name>` - value lookup\n" +
+        "`!search <name>` - search pets\n" +
+        "`!topvalues` - top 10 values\n"
+      );
+    }
+
+    // HATCHES
     if (cmd === "hatches") {
-      const data = await fetchEggs();
-      const items = Array.isArray(data) ? data : (data?.data ?? data?.items ?? []);
-      const embed = buildHatchesEmbed(items, "Tap Sim — Eggs / Hatches");
+      const data = await fetchAPI();
+      const items = extractItems(data);
+
+      const embed = buildTopEmbed(items, "Tap Sim — Eggs / Hatches");
       return message.reply({ embeds: [embed] });
     }
 
-    // !topvalues
+    // TOPVALUES
     if (cmd === "topvalues") {
-      const data = await fetchEggs();
-      const items = Array.isArray(data) ? data : (data?.data ?? data?.items ?? []);
-      const embed = buildHatchesEmbed(items, "Tap Sim — Top Values");
+      const data = await fetchAPI();
+      const items = extractItems(data);
+
+      const embed = buildTopEmbed(items, "Tap Sim — Top Values");
       return message.reply({ embeds: [embed] });
     }
 
-    // !value <name>
+    // VALUE
     if (cmd === "value") {
       const query = args.join(" ");
-      if (!query) return message.reply("Usage: `!value <pet name>`");
+      if (!query) return message.reply("Usage: `!value <name>`");
 
-      const data = await fetchEggs();
-      const items = Array.isArray(data) ? data : (data?.data ?? data?.items ?? []);
+      const data = await fetchAPI();
+      const items = extractItems(data);
+
       const matches = fuzzyFind(items, query);
 
-      if (!matches.length) return message.reply(`No match found for **${query}**.`);
+      if (!matches.length) {
+        return message.reply(`No match found for **${query}**.`);
+      }
 
       const best = matches[0];
       const name = pickName(best);
@@ -195,16 +258,10 @@ client.on("messageCreate", async (message) => {
 
       const embed = new EmbedBuilder()
         .setTitle(name)
+        .setDescription("Source: tapsim.gg")
         .addFields({
           name: "Value",
-          value: price != null
-            ? `**${formatNumber(price)}** ${TOKEN_EMOJI}`
-            : `**N/A** ${TOKEN_EMOJI}`,
-          inline: true
-        })
-        .addFields({
-          name: "Source",
-          value: "tapsim.gg",
+          value: `**${formatNumber(price)}** ${TOKEN_EMOJI}`,
           inline: true
         })
         .setTimestamp(new Date());
@@ -212,24 +269,24 @@ client.on("messageCreate", async (message) => {
       return message.reply({ embeds: [embed] });
     }
 
-    // !search <query>
+    // SEARCH
     if (cmd === "search") {
       const query = args.join(" ");
       if (!query) return message.reply("Usage: `!search <name>`");
 
-      const data = await fetchEggs();
-      const items = Array.isArray(data) ? data : (data?.data ?? data?.items ?? []);
+      const data = await fetchAPI();
+      const items = extractItems(data);
+
       const matches = fuzzyFind(items, query);
 
-      if (!matches.length) return message.reply(`No results for **${query}**.`);
+      if (!matches.length) {
+        return message.reply(`No results for **${query}**.`);
+      }
 
-      const lines = matches.slice(0, 10).map((it, idx) => {
+      const lines = matches.slice(0, 10).map((it, i) => {
         const name = pickName(it);
         const price = pickPrice(it);
-
-        return `**${idx + 1}. ${name}** — ${
-          price != null ? formatNumber(price) : "N/A"
-        } ${TOKEN_EMOJI}`;
+        return `**${i + 1}. ${name}** — **${formatNumber(price)}** ${TOKEN_EMOJI}`;
       });
 
       const embed = new EmbedBuilder()
@@ -240,22 +297,13 @@ client.on("messageCreate", async (message) => {
       return message.reply({ embeds: [embed] });
     }
 
-    // help
-    if (cmd === "help") {
-      return message.reply(
-        "**Commands:**\n" +
-        "`!hatches` - show eggs/hatches\n" +
-        "`!value <name>` - value lookup\n" +
-        "`!search <name>` - search pets\n" +
-        "`!topvalues` - top 10 values"
-      );
-    }
-
   } catch (err) {
     console.error(err);
-    return message.reply("Something went wrong (API error).");
+    return message.reply("API error / something broke.");
   }
 });
+
+// ---------------- READY ----------------
 
 client.once("ready", async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
@@ -265,8 +313,8 @@ client.once("ready", async () => {
     type: ActivityType.Watching
   });
 
-  await postHatchesIfChanged();
-  setInterval(postHatchesIfChanged, POST_INTERVAL_MINUTES * 60 * 1000);
+  await autoPostHatches();
+  setInterval(autoPostHatches, POST_INTERVAL_MINUTES * 60 * 1000);
 });
 
 client.login(TOKEN);

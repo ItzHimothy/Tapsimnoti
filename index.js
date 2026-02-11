@@ -1,4 +1,4 @@
-import "dotenv/config";
+inlineimport "dotenv/config";
 import {
   Client,
   GatewayIntentBits,
@@ -8,7 +8,10 @@ import {
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const HATCHES_CHANNEL_ID = process.env.HATCHES_CHANNEL_ID;
-const TOKEN_EMOJI = process.env.TOKEN_EMOJI || "<:token:1467296721502736384>";
+
+const TOKEN_EMOJI = "<:token:1467296721502736384>";
+const CLICK_EMOJI = "<:ClickIcon:1467297249103974683>";
+
 const API_BASE = process.env.API_BASE || "https://api.tapsim.gg/api/tapsim";
 const EGGS_ENDPOINT =
   process.env.EGGS_ENDPOINT || "/eggs?sort=price&order=desc&limit=100";
@@ -31,10 +34,7 @@ const client = new Client({
 
 async function fetchAPI() {
   const url = `${API_BASE}${EGGS_ENDPOINT}`;
-
-  const res = await fetch(url, {
-    headers: { Accept: "application/json" }
-  });
+  const res = await fetch(url, { headers: { Accept: "application/json" } });
 
   if (!res.ok) throw new Error(`API error ${res.status} ${res.statusText}`);
 
@@ -42,15 +42,12 @@ async function fetchAPI() {
 }
 
 function extractItems(data) {
-  // Handles multiple API response formats
   if (Array.isArray(data)) return data;
-
-  if (data?.data && Array.isArray(data.data)) return data.data;
-  if (data?.items && Array.isArray(data.items)) return data.items;
-  if (data?.eggs && Array.isArray(data.eggs)) return data.eggs;
-  if (data?.result && Array.isArray(data.result)) return data.result;
-  if (data?.results && Array.isArray(data.results)) return data.results;
-
+  if (Array.isArray(data?.data)) return data.data;
+  if (Array.isArray(data?.items)) return data.items;
+  if (Array.isArray(data?.eggs)) return data.eggs;
+  if (Array.isArray(data?.result)) return data.result;
+  if (Array.isArray(data?.results)) return data.results;
   return [];
 }
 
@@ -79,54 +76,65 @@ function pickName(item) {
   );
 }
 
-function pickPrice(item) {
+// VALUE IN TOKENS
+function pickTokenValue(item) {
   return (
-    item?.price ??
     item?.value ??
-    item?.tokens ??
-    item?.token ??
     item?.tokenValue ??
     item?.token_value ??
-    item?.token_price ??
-    item?.cost ??
-    item?.amount ??
+    item?.tokens ??
+    item?.token ??
     item?.worth ??
     null
   );
 }
 
-function sortByPrice(items) {
+// EGG COST IN CLICKS
+function pickEggCost(item) {
+  return (
+    item?.cost ??
+    item?.clickCost ??
+    item?.click_cost ??
+    item?.clicks ??
+    item?.price ?? // sometimes price = egg cost
+    null
+  );
+}
+
+function sortByTokenValue(items) {
   return items.sort((a, b) => {
-    const pa = Number(pickPrice(a)) || 0;
-    const pb = Number(pickPrice(b)) || 0;
-    return pb - pa;
+    const va = Number(pickTokenValue(a)) || 0;
+    const vb = Number(pickTokenValue(b)) || 0;
+    return vb - va;
   });
 }
 
 function fuzzyFind(items, query) {
   const q = normalize(query);
-
   if (!q) return [];
 
-  // exact match
+  // exact
   const exact = items.filter(it => normalize(pickName(it)) === q);
   if (exact.length) return exact;
 
-  // contains match
+  // contains
   const contains = items.filter(it => normalize(pickName(it)).includes(q));
   if (contains.length) return contains;
 
-  // scoring match
+  // remove spaces search
+  const qNoSpace = q.replace(/ /g, "");
+  const noSpaceMatch = items.filter(it =>
+    normalize(pickName(it)).replace(/ /g, "").includes(qNoSpace)
+  );
+  if (noSpaceMatch.length) return noSpaceMatch;
+
+  // score
   const parts = q.split(" ");
   const scored = items
     .map(it => {
       const name = normalize(pickName(it));
       let score = 0;
-
-      for (const p of parts) {
-        if (name.includes(p)) score++;
-      }
-
+      for (const p of parts) if (name.includes(p)) score++;
       return { it, score };
     })
     .filter(x => x.score > 0)
@@ -135,28 +143,75 @@ function fuzzyFind(items, query) {
   return scored.slice(0, 10).map(x => x.it);
 }
 
-function buildTopEmbed(items, title) {
-  const sorted = sortByPrice(items).slice(0, 10);
-
+function buildHatchesEmbed(items) {
   const embed = new EmbedBuilder()
-    .setTitle(title)
+    .setTitle("Tap Sim — Eggs / Hatches")
     .setDescription("Source: tapsim.gg")
     .setTimestamp(new Date());
 
-  if (!sorted.length) {
-    embed.addFields({ name: "Top (by price)", value: "No data", inline: false });
+  if (!items.length) {
+    embed.addFields({ name: "Top Eggs", value: "No data", inline: false });
     return embed;
   }
 
-  const lines = sorted.map((it, i) => {
-    const name = pickName(it);
-    const price = pickPrice(it);
+  // Sort by egg cost (clicks)
+  const sorted = items.sort((a, b) => {
+    const ca = Number(pickEggCost(a)) || 0;
+    const cb = Number(pickEggCost(b)) || 0;
+    return cb - ca;
+  });
 
-    return `**${i + 1}. ${name}** — **${formatNumber(price)}** ${TOKEN_EMOJI}`;
+  const top = sorted.slice(0, 10);
+
+  const lines = top.map((it, i) => {
+    const name = pickName(it);
+
+    const tokenValue = pickTokenValue(it);
+    const eggCost = pickEggCost(it);
+
+    const tokenText =
+      tokenValue != null
+        ? `${formatNumber(tokenValue)} ${TOKEN_EMOJI}`
+        : `N/A ${TOKEN_EMOJI}`;
+
+    const costText =
+      eggCost != null
+        ? `${formatNumber(eggCost)} ${CLICK_EMOJI}`
+        : `N/A ${CLICK_EMOJI}`;
+
+    return `**${i + 1}. ${name}**\nValue: **${tokenText}** | Cost: **${costText}**`;
   });
 
   embed.addFields({
-    name: "Top (by price)",
+    name: "Top Eggs (by cost)",
+    value: lines.join("\n\n"),
+    inline: false
+  });
+
+  return embed;
+}
+
+function buildTopValuesEmbed(items) {
+  const embed = new EmbedBuilder()
+    .setTitle("Tap Sim — Top Values")
+    .setDescription("Source: tapsim.gg")
+    .setTimestamp(new Date());
+
+  if (!items.length) {
+    embed.addFields({ name: "Top Values", value: "No data", inline: false });
+    return embed;
+  }
+
+  const sorted = sortByTokenValue(items).slice(0, 10);
+
+  const lines = sorted.map((it, i) => {
+    const name = pickName(it);
+    const value = pickTokenValue(it);
+    return `**${i + 1}. ${name}** — **${formatNumber(value)}** ${TOKEN_EMOJI}`;
+  });
+
+  embed.addFields({
+    name: "Top (by token value)",
     value: lines.join("\n"),
     inline: false
   });
@@ -171,7 +226,7 @@ let lastHash = "";
 function createHash(items) {
   return items
     .slice(0, 10)
-    .map(it => `${pickName(it)}:${pickPrice(it)}`)
+    .map(it => `${pickName(it)}:${pickTokenValue(it)}:${pickEggCost(it)}`)
     .join("|");
 }
 
@@ -182,15 +237,13 @@ async function autoPostHatches() {
 
     if (!items.length) return;
 
-    const sorted = sortByPrice(items);
-    const newHash = createHash(sorted);
-
+    const newHash = createHash(items);
     if (newHash === lastHash) return;
 
     const channel = await client.channels.fetch(HATCHES_CHANNEL_ID);
     if (!channel || !channel.isTextBased()) return;
 
-    const embed = buildTopEmbed(items, "Tap Sim — Hatch Update");
+    const embed = buildHatchesEmbed(items);
     await channel.send({ embeds: [embed] });
 
     lastHash = newHash;
@@ -209,36 +262,32 @@ client.on("messageCreate", async (message) => {
   const cmd = args.shift()?.toLowerCase();
 
   try {
-    // HELP
     if (cmd === "help") {
       return message.reply(
         "**Commands:**\n" +
         "`!hatches` - show eggs/hatches\n" +
         "`!value <name>` - value lookup\n" +
         "`!search <name>` - search pets\n" +
-        "`!topvalues` - top 10 values\n"
+        "`!topvalues` - top 10 token values"
       );
     }
 
-    // HATCHES
     if (cmd === "hatches") {
       const data = await fetchAPI();
       const items = extractItems(data);
 
-      const embed = buildTopEmbed(items, "Tap Sim — Eggs / Hatches");
+      const embed = buildHatchesEmbed(items);
       return message.reply({ embeds: [embed] });
     }
 
-    // TOPVALUES
     if (cmd === "topvalues") {
       const data = await fetchAPI();
       const items = extractItems(data);
 
-      const embed = buildTopEmbed(items, "Tap Sim — Top Values");
+      const embed = buildTopValuesEmbed(items);
       return message.reply({ embeds: [embed] });
     }
 
-    // VALUE
     if (cmd === "value") {
       const query = args.join(" ");
       if (!query) return message.reply("Usage: `!value <name>`");
@@ -254,22 +303,36 @@ client.on("messageCreate", async (message) => {
 
       const best = matches[0];
       const name = pickName(best);
-      const price = pickPrice(best);
+
+      const tokenValue = pickTokenValue(best);
+      const eggCost = pickEggCost(best);
 
       const embed = new EmbedBuilder()
         .setTitle(name)
         .setDescription("Source: tapsim.gg")
-        .addFields({
-          name: "Value",
-          value: `**${formatNumber(price)}** ${TOKEN_EMOJI}`,
-          inline: true
-        })
+        .addFields(
+          {
+            name: "Value",
+            value:
+              tokenValue != null
+                ? `**${formatNumber(tokenValue)}** ${TOKEN_EMOJI}`
+                : `N/A ${TOKEN_EMOJI}`,
+            inline: true
+          },
+          {
+            name: "Egg Cost",
+            value:
+              eggCost != null
+                ? `**${formatNumber(eggCost)}** ${CLICK_EMOJI}`
+                : `N/A ${CLICK_EMOJI}`,
+            inline: true
+          }
+        )
         .setTimestamp(new Date());
 
       return message.reply({ embeds: [embed] });
     }
 
-    // SEARCH
     if (cmd === "search") {
       const query = args.join(" ");
       if (!query) return message.reply("Usage: `!search <name>`");
@@ -285,8 +348,9 @@ client.on("messageCreate", async (message) => {
 
       const lines = matches.slice(0, 10).map((it, i) => {
         const name = pickName(it);
-        const price = pickPrice(it);
-        return `**${i + 1}. ${name}** — **${formatNumber(price)}** ${TOKEN_EMOJI}`;
+        const value = pickTokenValue(it);
+
+        return `**${i + 1}. ${name}** — **${formatNumber(value)}** ${TOKEN_EMOJI}`;
       });
 
       const embed = new EmbedBuilder()

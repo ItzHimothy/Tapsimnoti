@@ -11,9 +11,10 @@ const HATCHES_CHANNEL_ID = process.env.HATCHES_CHANNEL_ID;
 const TOKEN_EMOJI = "<:token:1467296721502736384>";
 const CLICK_EMOJI = "<:ClickIcon:1467297249103974683>";
 
-const API_BASE = process.env.API_BASE || "https://api.tapsim.gg/api/tapsim";
-const EGGS_ENDPOINT =
-  process.env.EGGS_ENDPOINT || "/eggs?sort=price&order=desc&limit=100";
+const API_BASE = "https://api.tapsim.gg/api/tapsim";
+
+const EGGS_ENDPOINT = "/eggs?sort=price&order=desc&limit=100";
+const ITEMS_ENDPOINT = "/items?limit=100";
 
 const POST_INTERVAL_MINUTES = Number(process.env.POST_INTERVAL_MINUTES || 5);
 const PREFIX = "!";
@@ -41,10 +42,7 @@ async function fetchAPI(endpoint) {
     }
   });
 
-  if (!res.ok) {
-    throw new Error(`API error ${res.status} ${res.statusText}`);
-  }
-
+  if (!res.ok) throw new Error(`API error ${res.status} ${res.statusText}`);
   return await res.json();
 }
 
@@ -53,9 +51,6 @@ function extractItems(data) {
   if (Array.isArray(data?.data)) return data.data;
   if (Array.isArray(data?.items)) return data.items;
   if (Array.isArray(data?.eggs)) return data.eggs;
-  if (Array.isArray(data?.pets)) return data.pets;
-  if (Array.isArray(data?.result)) return data.result;
-  if (Array.isArray(data?.results)) return data.results;
   return [];
 }
 
@@ -74,37 +69,28 @@ function formatNumber(n) {
 }
 
 function pickName(item) {
-  return (
-    item?.name ||
-    item?.petName ||
-    item?.eggName ||
-    item?.title ||
-    item?.displayName ||
-    "Unknown"
-  );
+  return item?.name || item?.title || item?.displayName || "Unknown";
 }
 
-// Token value (pet worth)
+// token value (pet worth)
 function pickTokenValue(item) {
   return (
     item?.value ??
     item?.tokenValue ??
     item?.token_value ??
     item?.tokens ??
-    item?.token ??
     item?.worth ??
     null
   );
 }
 
-// Click cost (egg cost)
+// egg cost (clicks)
 function pickEggCost(item) {
   return (
-    item?.clickCost ??
-    item?.click_cost ??
-    item?.clicks ??
-    item?.cost ??
     item?.price ??
+    item?.cost ??
+    item?.clickCost ??
+    item?.clicks ??
     null
   );
 }
@@ -129,8 +115,8 @@ function fuzzyFind(items, query) {
 
 // ---------------- EMBEDS ----------------
 
-function buildHatchesEmbed(items) {
-  const sorted = items
+function buildHatchesEmbed(eggs) {
+  const sorted = eggs
     .sort((a, b) => (Number(pickEggCost(b)) || 0) - (Number(pickEggCost(a)) || 0))
     .slice(0, 10);
 
@@ -144,15 +130,15 @@ function buildHatchesEmbed(items) {
     return embed;
   }
 
-  const lines = sorted.map((it, i) => {
-    const name = pickName(it);
-    const cost = pickEggCost(it);
+  const lines = sorted.map((egg, i) => {
+    const name = pickName(egg);
+    const cost = pickEggCost(egg);
 
     return `**${i + 1}. ${name}** — **${formatNumber(cost)}** ${CLICK_EMOJI}`;
   });
 
   embed.addFields({
-    name: "Top Eggs (by cost)",
+    name: "Top Eggs (by click cost)",
     value: lines.join("\n"),
     inline: false
   });
@@ -162,7 +148,7 @@ function buildHatchesEmbed(items) {
 
 function buildTopValuesEmbed(items) {
   const sorted = items
-    .sort((a, b) => (Number(pickEggCost(b)) || 0) - (Number(pickEggCost(a)) || 0))
+    .sort((a, b) => (Number(pickTokenValue(b)) || 0) - (Number(pickTokenValue(a)) || 0))
     .slice(0, 10);
 
   const embed = new EmbedBuilder()
@@ -175,15 +161,15 @@ function buildTopValuesEmbed(items) {
     return embed;
   }
 
-  const lines = sorted.map((it, i) => {
-    const name = pickName(it);
-    const cost = pickEggCost(it);
+  const lines = sorted.map((pet, i) => {
+    const name = pickName(pet);
+    const value = pickTokenValue(pet);
 
-    return `**${i + 1}. ${name}** — **${formatNumber(cost)}** ${CLICK_EMOJI}`;
+    return `**${i + 1}. ${name}** — **${formatNumber(value)}** ${TOKEN_EMOJI}`;
   });
 
   embed.addFields({
-    name: "Top 10 (by click cost)",
+    name: "Top 10 Pets (token value)",
     value: lines.join("\n"),
     inline: false
   });
@@ -191,33 +177,33 @@ function buildTopValuesEmbed(items) {
   return embed;
 }
 
-// ---------------- AUTO POST ----------------
+// ---------------- AUTO POST HATCHES ----------------
 
-let lastHash = "";
+let lastEggHash = "";
 
-function createHash(items) {
+function createEggHash(items) {
   return items
     .slice(0, 10)
     .map(it => `${pickName(it)}:${pickEggCost(it)}`)
     .join("|");
 }
 
-async function autoPost() {
+async function autoPostHatches() {
   try {
     const data = await fetchAPI(EGGS_ENDPOINT);
-    const items = extractItems(data);
+    const eggs = extractItems(data);
 
-    if (!items.length) return;
+    if (!eggs.length) return;
 
-    const newHash = createHash(items);
-    if (newHash === lastHash) return;
+    const newHash = createEggHash(eggs);
+    if (newHash === lastEggHash) return;
 
     const channel = await client.channels.fetch(HATCHES_CHANNEL_ID);
     if (!channel || !channel.isTextBased()) return;
 
-    await channel.send({ embeds: [buildHatchesEmbed(items)] });
+    await channel.send({ embeds: [buildHatchesEmbed(eggs)] });
 
-    lastHash = newHash;
+    lastEggHash = newHash;
   } catch (err) {
     console.error("Auto post error:", err?.message || err);
   }
@@ -236,63 +222,35 @@ client.on("messageCreate", async (message) => {
     if (cmd === "help") {
       return message.reply(
         "**Commands:**\n" +
-        "`!hatches` - show eggs/hatches\n" +
-        "`!value <name>` - token value lookup\n" +
-        "`!search <name>` - search eggs\n" +
-        "`!topvalues` - top 10 click cost\n"
+        "`!hatches` - show eggs/hatches (ClickIcon)\n" +
+        "`!topvalues` - top 10 pet values (Tokens)\n" +
+        "`!value <name>` - lookup pet value (Tokens)\n" +
+        "`!search <name>` - search pets\n"
       );
     }
 
     if (cmd === "hatches") {
       const data = await fetchAPI(EGGS_ENDPOINT);
-      const items = extractItems(data);
-      return message.reply({ embeds: [buildHatchesEmbed(items)] });
+      const eggs = extractItems(data);
+
+      return message.reply({ embeds: [buildHatchesEmbed(eggs)] });
     }
 
     if (cmd === "topvalues") {
-      const data = await fetchAPI(EGGS_ENDPOINT);
+      const data = await fetchAPI(ITEMS_ENDPOINT);
       const items = extractItems(data);
+
       return message.reply({ embeds: [buildTopValuesEmbed(items)] });
-    }
-
-    if (cmd === "search") {
-      const query = args.join(" ");
-      if (!query) return message.reply("Usage: `!search <name>`");
-
-      const data = await fetchAPI(EGGS_ENDPOINT);
-      const items = extractItems(data);
-
-      const matches = fuzzyFind(items, query);
-
-      if (!matches.length) return message.reply(`No match found for **${query}**.`);
-
-      const top = matches.slice(0, 10);
-
-      const lines = top.map((it, i) => {
-        const name = pickName(it);
-        const cost = pickEggCost(it);
-
-        return `**${i + 1}. ${name}** — **${formatNumber(cost)}** ${CLICK_EMOJI}`;
-      });
-
-      const embed = new EmbedBuilder()
-        .setTitle(`Egg Search: ${query}`)
-        .setDescription(lines.join("\n"))
-        .setTimestamp(new Date());
-
-      return message.reply({ embeds: [embed] });
     }
 
     if (cmd === "value") {
       const query = args.join(" ");
       if (!query) return message.reply("Usage: `!value <name>`");
 
-      // right now value only works if the API provides token values inside eggs list
-      const data = await fetchAPI(EGGS_ENDPOINT);
+      const data = await fetchAPI(ITEMS_ENDPOINT);
       const items = extractItems(data);
 
       const matches = fuzzyFind(items, query);
-
       if (!matches.length) return message.reply(`No match found for **${query}**.`);
 
       const best = matches[0];
@@ -307,6 +265,33 @@ client.on("messageCreate", async (message) => {
           value: `**${formatNumber(value)}** ${TOKEN_EMOJI}`,
           inline: true
         })
+        .setTimestamp(new Date());
+
+      return message.reply({ embeds: [embed] });
+    }
+
+    if (cmd === "search") {
+      const query = args.join(" ");
+      if (!query) return message.reply("Usage: `!search <name>`");
+
+      const data = await fetchAPI(ITEMS_ENDPOINT);
+      const items = extractItems(data);
+
+      const matches = fuzzyFind(items, query);
+      if (!matches.length) return message.reply(`No results for **${query}**.`);
+
+      const top = matches.slice(0, 10);
+
+      const lines = top.map((pet, i) => {
+        const name = pickName(pet);
+        const value = pickTokenValue(pet);
+
+        return `**${i + 1}. ${name}** — **${formatNumber(value)}** ${TOKEN_EMOJI}`;
+      });
+
+      const embed = new EmbedBuilder()
+        .setTitle(`Search results: ${query}`)
+        .setDescription(lines.join("\n"))
         .setTimestamp(new Date());
 
       return message.reply({ embeds: [embed] });
@@ -328,8 +313,8 @@ client.once("ready", async () => {
     type: ActivityType.Watching
   });
 
-  await autoPost();
-  setInterval(autoPost, POST_INTERVAL_MINUTES * 60 * 1000);
+  await autoPostHatches();
+  setInterval(autoPostHatches, POST_INTERVAL_MINUTES * 60 * 1000);
 });
 
 client.login(TOKEN);

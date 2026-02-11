@@ -1,26 +1,15 @@
-import {
-  Client,
-  GatewayIntentBits,
-  EmbedBuilder,
-  ActivityType
-} from "discord.js";
+import "dotenv/config";
+import fetch from "node-fetch";
+import { Client, GatewayIntentBits, EmbedBuilder } from "discord.js";
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const HATCHES_CHANNEL_ID = process.env.HATCHES_CHANNEL_ID;
+const POST_INTERVAL_MINUTES = parseInt(process.env.POST_INTERVAL_MINUTES || "5");
 
-const TOKEN_EMOJI = "<:token:1467296721502736384>";
-const CLICK_EMOJI = "<:ClickIcon:1467297249103974683>";
+const CLICK_EMOJI = process.env.CLICK_EMOJI || "<:ClickIcon:1467297249103974683>";
+const TOKEN_EMOJI = process.env.TOKEN_EMOJI || "<:token:1467296721502736384>";
 
 const API_BASE = "https://api.tapsim.gg/api/tapsim";
-
-const EGGS_ENDPOINT = "/eggs?sort=price&order=desc&limit=100";
-const ITEMS_ENDPOINT = "/items?limit=100";
-
-const POST_INTERVAL_MINUTES = Number(process.env.POST_INTERVAL_MINUTES || 5);
-const PREFIX = "!";
-
-if (!TOKEN) throw new Error("Missing DISCORD_TOKEN");
-if (!HATCHES_CHANNEL_ID) throw new Error("Missing HATCHES_CHANNEL_ID");
 
 const client = new Client({
   intents: [
@@ -30,291 +19,315 @@ const client = new Client({
   ]
 });
 
-// ---------------- HELPERS ----------------
-
-async function fetchAPI(endpoint) {
-  const url = `${API_BASE}${endpoint}`;
-
-  const res = await fetch(url, {
-    headers: {
-      Accept: "application/json",
-      "User-Agent": "TapSimBot/1.0 (Discord Bot)"
-    }
-  });
-
-  if (!res.ok) throw new Error(`API error ${res.status} ${res.statusText}`);
-  return await res.json();
-}
-
-function extractItems(data) {
-  if (Array.isArray(data)) return data;
-  if (Array.isArray(data?.data)) return data.data;
-  if (Array.isArray(data?.items)) return data.items;
-  if (Array.isArray(data?.eggs)) return data.eggs;
-  return [];
-}
-
-function normalize(str) {
-  return String(str || "")
-    .toLowerCase()
-    .replace(/[^a-z0-9 ]/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function formatNumber(n) {
-  const x = Number(n);
-  if (Number.isNaN(x)) return "N/A";
-  return x.toLocaleString("en-US");
-}
-
-function pickName(item) {
-  return item?.name || item?.title || item?.displayName || "Unknown";
-}
-
-// token value (pet worth)
-function pickTokenValue(item) {
-  return (
-    item?.value ??
-    item?.tokenValue ??
-    item?.token_value ??
-    item?.tokens ??
-    item?.worth ??
-    null
-  );
-}
-
-// egg cost (clicks)
-function pickEggCost(item) {
-  return (
-    item?.price ??
-    item?.cost ??
-    item?.clickCost ??
-    item?.clicks ??
-    null
-  );
-}
-
-function fuzzyFind(items, query) {
-  const q = normalize(query);
-  if (!q) return [];
-
-  const exact = items.filter(it => normalize(pickName(it)) === q);
-  if (exact.length) return exact;
-
-  const contains = items.filter(it => normalize(pickName(it)).includes(q));
-  if (contains.length) return contains;
-
-  const qNoSpace = q.replace(/ /g, "");
-  const noSpace = items.filter(it =>
-    normalize(pickName(it)).replace(/ /g, "").includes(qNoSpace)
-  );
-
-  return noSpace;
-}
-
-// ---------------- EMBEDS ----------------
-
-function buildHatchesEmbed(eggs) {
-  const sorted = eggs
-    .sort((a, b) => (Number(pickEggCost(b)) || 0) - (Number(pickEggCost(a)) || 0))
-    .slice(0, 10);
-
-  const embed = new EmbedBuilder()
-    .setTitle("Tap Sim — Eggs / Hatches")
-    .setDescription("Source: tapsim.gg")
-    .setTimestamp(new Date());
-
-  if (!sorted.length) {
-    embed.addFields({ name: "Eggs", value: "No data", inline: false });
-    return embed;
-  }
-
-  const lines = sorted.map((egg, i) => {
-    const name = pickName(egg);
-    const cost = pickEggCost(egg);
-
-    return `**${i + 1}. ${name}** — **${formatNumber(cost)}** ${CLICK_EMOJI}`;
-  });
-
-  embed.addFields({
-    name: "Top Eggs (by click cost)",
-    value: lines.join("\n"),
-    inline: false
-  });
-
-  return embed;
-}
-
-function buildTopValuesEmbed(items) {
-  const sorted = items
-    .sort((a, b) => (Number(pickTokenValue(b)) || 0) - (Number(pickTokenValue(a)) || 0))
-    .slice(0, 10);
-
-  const embed = new EmbedBuilder()
-    .setTitle("Tap Sim — Top Values")
-    .setDescription("Source: tapsim.gg")
-    .setTimestamp(new Date());
-
-  if (!sorted.length) {
-    embed.addFields({ name: "Top Values", value: "No data", inline: false });
-    return embed;
-  }
-
-  const lines = sorted.map((pet, i) => {
-    const name = pickName(pet);
-    const value = pickTokenValue(pet);
-
-    return `**${i + 1}. ${name}** — **${formatNumber(value)}** ${TOKEN_EMOJI}`;
-  });
-
-  embed.addFields({
-    name: "Top 10 Pets (token value)",
-    value: lines.join("\n"),
-    inline: false
-  });
-
-  return embed;
-}
-
-// ---------------- AUTO POST HATCHES ----------------
-
-let lastEggHash = "";
-
-function createEggHash(items) {
-  return items
-    .slice(0, 10)
-    .map(it => `${pickName(it)}:${pickEggCost(it)}`)
-    .join("|");
-}
-
-async function autoPostHatches() {
+// ------------------------
+// HELPERS
+// ------------------------
+async function getJSON(url) {
   try {
-    const data = await fetchAPI(EGGS_ENDPOINT);
-    const eggs = extractItems(data);
-
-    if (!eggs.length) return;
-
-    const newHash = createEggHash(eggs);
-    if (newHash === lastEggHash) return;
-
-    const channel = await client.channels.fetch(HATCHES_CHANNEL_ID);
-    if (!channel || !channel.isTextBased()) return;
-
-    await channel.send({ embeds: [buildHatchesEmbed(eggs)] });
-
-    lastEggHash = newHash;
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    return await res.json();
   } catch (err) {
-    console.error("Auto post error:", err?.message || err);
+    console.log("Fetch error:", err);
+    return null;
   }
 }
 
-// ---------------- COMMANDS ----------------
+function cleanName(str) {
+  return str.toLowerCase().trim();
+}
 
+// ------------------------
+// API FUNCTIONS
+// ------------------------
+async function fetchEggs() {
+  return await getJSON(`${API_BASE}/eggs?sort=price&order=desc&limit=100`);
+}
+
+async function fetchItems(limit = 100) {
+  return await getJSON(`${API_BASE}/items?limit=${limit}`);
+}
+
+async function fetchTopValues() {
+  return await getJSON(`${API_BASE}/items?type=Pet&sort=value&order=desc&page=1&limit=50`);
+}
+
+async function fetchEnchants() {
+  return await getJSON(`${API_BASE}/plaza/enchants`);
+}
+
+async function fetchSnipes() {
+  return await getJSON(`${API_BASE}/plaza/snipes?basis=value&maxPercent=80`);
+}
+
+async function fetchAds() {
+  return await getJSON(`${API_BASE}/ads?page=1&limit=20`);
+}
+
+// ------------------------
+// COMMAND HANDLER
+// ------------------------
 client.on("messageCreate", async (message) => {
   if (message.author.bot) return;
-  if (!message.content.startsWith(PREFIX)) return;
+  if (!message.content.startsWith("!")) return;
 
-  const args = message.content.slice(PREFIX.length).trim().split(/ +/);
-  const cmd = args.shift()?.toLowerCase();
+  const args = message.content.slice(1).trim().split(/ +/);
+  const command = args.shift().toLowerCase();
 
-  try {
-    if (cmd === "help") {
-      return message.reply(
-        "**Commands:**\n" +
-        "`!hatches` - show eggs/hatches (ClickIcon)\n" +
-        "`!topvalues` - top 10 pet values (Tokens)\n" +
-        "`!value <name>` - lookup pet value (Tokens)\n" +
-        "`!search <name>` - search pets\n"
-      );
+  // !help
+  if (command === "help") {
+    const embed = new EmbedBuilder()
+      .setTitle("📌 Tap Sim Bot Commands")
+      .setDescription("Here are all commands:")
+      .addFields(
+        { name: "!hatches", value: "Show eggs/hatches list" },
+        { name: "!hatches <egg>", value: "Search eggs by name" },
+        { name: "!value <pet>", value: "Value lookup" },
+        { name: "!search <name>", value: "Search pets/items" },
+        { name: "!topvalues", value: "Top 10 values" },
+        { name: "!enchants", value: "Show enchants list" },
+        { name: "!snipes", value: "Show plaza snipes" },
+        { name: "!ads", value: "Show latest trade ads" }
+      )
+      .setFooter({ text: "Source: tapsim.gg" });
+
+    return message.channel.send({ embeds: [embed] });
+  }
+
+  // !hatches
+  if (command === "hatches") {
+    const query = args.join(" ").toLowerCase();
+    const data = await fetchEggs();
+
+    if (!data || !data.rows) {
+      return message.reply("❌ API error fetching eggs.");
     }
 
-    if (cmd === "hatches") {
-      const data = await fetchAPI(EGGS_ENDPOINT);
-      const eggs = extractItems(data);
+    let eggs = data.rows;
 
-      return message.reply({ embeds: [buildHatchesEmbed(eggs)] });
+    if (query) {
+      eggs = eggs.filter((e) => cleanName(e.name).includes(query));
     }
 
-    if (cmd === "topvalues") {
-      const data = await fetchAPI(ITEMS_ENDPOINT);
-      const items = extractItems(data);
+    eggs = eggs.slice(0, 10);
 
-      return message.reply({ embeds: [buildTopValuesEmbed(items)] });
+    if (eggs.length === 0) {
+      return message.reply("❌ No eggs found.");
     }
 
-    if (cmd === "value") {
-      const query = args.join(" ");
-      if (!query) return message.reply("Usage: `!value <name>`");
+    const embed = new EmbedBuilder()
+      .setTitle("🥚 Tap Sim — Eggs / Hatches")
+      .setDescription(
+        eggs
+          .map((egg) => {
+            const price = egg.price ?? "N/A";
+            return `**${egg.name}**\nPrice: ${CLICK_EMOJI} **${price}**`;
+          })
+          .join("\n\n")
+      )
+      .setFooter({ text: "Source: tapsim.gg" });
 
-      const data = await fetchAPI(ITEMS_ENDPOINT);
-      const items = extractItems(data);
+    return message.channel.send({ embeds: [embed] });
+  }
 
-      const matches = fuzzyFind(items, query);
-      if (!matches.length) return message.reply(`No match found for **${query}**.`);
+  // !value
+  if (command === "value") {
+    const query = args.join(" ").toLowerCase();
+    if (!query) return message.reply("❌ Use: `!value <pet name>`");
 
-      const best = matches[0];
-      const name = pickName(best);
-      const value = pickTokenValue(best);
+    const data = await fetchItems(200);
 
-      const embed = new EmbedBuilder()
-        .setTitle(name)
-        .setDescription("Source: tapsim.gg")
-        .addFields({
-          name: "Token Value",
-          value: `**${formatNumber(value)}** ${TOKEN_EMOJI}`,
-          inline: true
-        })
-        .setTimestamp(new Date());
-
-      return message.reply({ embeds: [embed] });
+    if (!data || !data.rows) {
+      return message.reply("❌ API error fetching items.");
     }
 
-    if (cmd === "search") {
-      const query = args.join(" ");
-      if (!query) return message.reply("Usage: `!search <name>`");
+    const item = data.rows.find((i) => cleanName(i.name) === query);
 
-      const data = await fetchAPI(ITEMS_ENDPOINT);
-      const items = extractItems(data);
-
-      const matches = fuzzyFind(items, query);
-      if (!matches.length) return message.reply(`No results for **${query}**.`);
-
-      const top = matches.slice(0, 10);
-
-      const lines = top.map((pet, i) => {
-        const name = pickName(pet);
-        const value = pickTokenValue(pet);
-
-        return `**${i + 1}. ${name}** — **${formatNumber(value)}** ${TOKEN_EMOJI}`;
-      });
-
-      const embed = new EmbedBuilder()
-        .setTitle(`Search results: ${query}`)
-        .setDescription(lines.join("\n"))
-        .setTimestamp(new Date());
-
-      return message.reply({ embeds: [embed] });
+    if (!item) {
+      return message.reply(`❌ No match found for **${query}**.`);
     }
 
-  } catch (err) {
-    console.error(err);
-    return message.reply("Something broke (API error).");
+    const embed = new EmbedBuilder()
+      .setTitle(`💎 Tap Sim — Value Lookup`)
+      .setDescription(
+        `**${item.name}**\n\nValue: ${CLICK_EMOJI} **${item.value ?? "N/A"}**\nExist: **${item.exist ?? "N/A"}**`
+      )
+      .setFooter({ text: "Source: tapsim.gg" });
+
+    return message.channel.send({ embeds: [embed] });
+  }
+
+  // !search
+  if (command === "search") {
+    const query = args.join(" ").toLowerCase();
+    if (!query) return message.reply("❌ Use: `!search <name>`");
+
+    const data = await fetchItems(300);
+
+    if (!data || !data.rows) {
+      return message.reply("❌ API error fetching items.");
+    }
+
+    const matches = data.rows
+      .filter((i) => cleanName(i.name).includes(query))
+      .slice(0, 10);
+
+    if (matches.length === 0) {
+      return message.reply(`❌ No match found for **${query}**.`);
+    }
+
+    const embed = new EmbedBuilder()
+      .setTitle("🔎 Tap Sim — Search Results")
+      .setDescription(
+        matches
+          .map((m) => `**${m.name}** → ${CLICK_EMOJI} **${m.value ?? "N/A"}**`)
+          .join("\n")
+      )
+      .setFooter({ text: "Source: tapsim.gg" });
+
+    return message.channel.send({ embeds: [embed] });
+  }
+
+  // !topvalues
+  if (command === "topvalues") {
+    const data = await fetchTopValues();
+
+    if (!data || !data.rows) {
+      return message.reply("❌ API error fetching top values.");
+    }
+
+    const top10 = data.rows.slice(0, 10);
+
+    const embed = new EmbedBuilder()
+      .setTitle("🏆 Tap Sim — Top 10 Values")
+      .setDescription(
+        top10
+          .map((pet, index) => {
+            return `**${index + 1}. ${pet.name}**\nValue: ${CLICK_EMOJI} **${pet.value ?? "N/A"}**`;
+          })
+          .join("\n\n")
+      )
+      .setFooter({ text: "Source: tapsim.gg" });
+
+    return message.channel.send({ embeds: [embed] });
+  }
+
+  // !enchants
+  if (command === "enchants") {
+    const data = await fetchEnchants();
+
+    if (!data || !data.rows) {
+      return message.reply("❌ API error fetching enchants.");
+    }
+
+    const enchants = data.rows.slice(0, 10);
+
+    const embed = new EmbedBuilder()
+      .setTitle("✨ Tap Sim — Enchants")
+      .setDescription(
+        enchants
+          .map((e) => `**${e.name}** → ${CLICK_EMOJI} **${e.value ?? "N/A"}**`)
+          .join("\n")
+      )
+      .setFooter({ text: "Source: tapsim.gg" });
+
+    return message.channel.send({ embeds: [embed] });
+  }
+
+  // !snipes
+  if (command === "snipes") {
+    const data = await fetchSnipes();
+
+    if (!data || !data.rows) {
+      return message.reply("❌ API error fetching snipes.");
+    }
+
+    const snipes = data.rows.slice(0, 5);
+
+    const embed = new EmbedBuilder()
+      .setTitle("🎯 Tap Sim — Plaza Snipes")
+      .setDescription(
+        snipes
+          .map((s) => {
+            return `**${s.itemName}**\nPrice: ${CLICK_EMOJI} **${s.price}**\nPercent: **${s.percent}%**`;
+          })
+          .join("\n\n")
+      )
+      .setFooter({ text: "Source: tapsim.gg" });
+
+    return message.channel.send({ embeds: [embed] });
+  }
+
+  // !ads
+  if (command === "ads") {
+    const data = await fetchAds();
+
+    if (!data || !data.rows) {
+      return message.reply("❌ API error fetching ads.");
+    }
+
+    const ads = data.rows.slice(0, 3);
+
+    const embed = new EmbedBuilder()
+      .setTitle("📢 Tap Sim — Latest Trade Ads")
+      .setDescription(
+        ads
+          .map((ad) => {
+            return `**Offering:** ${ad.offering ?? "N/A"}\n**Wanting:** ${ad.wanting ?? "N/A"}`;
+          })
+          .join("\n\n")
+      )
+      .setFooter({ text: "Source: tapsim.gg" });
+
+    return message.channel.send({ embeds: [embed] });
   }
 });
 
-// ---------------- READY ----------------
+// ------------------------
+// AUTO POST HATCHES
+// ------------------------
+async function autoPostHatches() {
+  const channel = await client.channels.fetch(HATCHES_CHANNEL_ID).catch(() => null);
+  if (!channel) {
+    console.log("Hatches channel not found.");
+    return;
+  }
 
+  const data = await fetchEggs();
+
+  if (!data || !data.rows) {
+    console.log("Failed to fetch eggs.");
+    return;
+  }
+
+  const eggs = data.rows.slice(0, 10);
+
+  const embed = new EmbedBuilder()
+    .setTitle("🥚 Tap Sim — Auto Hatch Update")
+    .setDescription(
+      eggs
+        .map((egg) => {
+          const price = egg.price ?? "N/A";
+          return `**${egg.name}**\nPrice: ${CLICK_EMOJI} **${price}**`;
+        })
+        .join("\n\n")
+    )
+    .setFooter({ text: `Updated every ${POST_INTERVAL_MINUTES} minutes | tapsim.gg` });
+
+  channel.send({ embeds: [embed] });
+}
+
+// ------------------------
+// READY EVENT
+// ------------------------
 client.once("ready", async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
 
-  client.user.setActivity({
-    name: "Tap Sim Values",
-    type: ActivityType.Watching
-  });
-
-  await autoPostHatches();
+  // Start auto posting loop
   setInterval(autoPostHatches, POST_INTERVAL_MINUTES * 60 * 1000);
+
+  // Post instantly on startup
+  autoPostHatches();
 });
 
 client.login(TOKEN);

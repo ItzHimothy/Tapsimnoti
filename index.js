@@ -5,11 +5,11 @@ const TOKEN = process.env.DISCORD_TOKEN;
 const HATCHES_CHANNEL_ID = process.env.HATCHES_CHANNEL_ID || "1449428623315435610";
 const POST_INTERVAL_MINUTES = parseInt(process.env.POST_INTERVAL_MINUTES || "5", 10);
 
-const CLICK_EMOJI = process.env.CLICK_EMOJI || "<:ClickIcon:1467297249103974683>"; // Taps
-const TOKEN_EMOJI = process.env.TOKEN_EMOJI || "<:token:1467296721502736384>";     // Tokens
+const CLICK_EMOJI = process.env.CLICK_EMOJI || "<:ClickIcon:1467297249103974683>"; // taps
+const TOKEN_EMOJI = process.env.TOKEN_EMOJI || "🪙"; // tokens
 
 const API_BASE = "https://api.tapsim.gg/api/tapsim";
-const WEBSITE_ORIGIN = "https://www.tapsim.gg";
+const WEBSITE_BASE = "https://www.tapsim.gg";
 
 if (!TOKEN) throw new Error("Missing DISCORD_TOKEN");
 
@@ -30,15 +30,14 @@ async function getJSON(url) {
       method: "GET",
       headers: {
         "Accept": "application/json",
-        "Origin": WEBSITE_ORIGIN,
-        "Referer": WEBSITE_ORIGIN + "/",
-        "User-Agent": "Mozilla/5.0 (compatible; TapSimDiscordBot/1.0)"
+        "Origin": WEBSITE_BASE,
+        "Referer": WEBSITE_BASE + "/",
+        "User-Agent": "Mozilla/5.0 (TapSimBot)"
       }
     });
 
     if (!res.ok) {
-      const text = await res.text().catch(() => "");
-      console.log("API FAIL", res.status, url, text.slice(0, 250));
+      console.log("API FAIL", res.status, url);
       return null;
     }
 
@@ -52,19 +51,13 @@ async function getJSON(url) {
 function extractList(data) {
   if (!data) return [];
   if (Array.isArray(data)) return data;
-
   if (Array.isArray(data.rows)) return data.rows;
   if (Array.isArray(data.data)) return data.data;
   if (Array.isArray(data.items)) return data.items;
   if (Array.isArray(data.results)) return data.results;
-  if (Array.isArray(data.list)) return data.list;
-  if (Array.isArray(data.payload)) return data.payload;
 
-  // fallback
-  if (typeof data === "object") {
-    for (const v of Object.values(data)) {
-      if (Array.isArray(v)) return v;
-    }
+  for (const v of Object.values(data)) {
+    if (Array.isArray(v)) return v;
   }
 
   return [];
@@ -74,66 +67,96 @@ function norm(s) {
   return String(s || "").toLowerCase().trim();
 }
 
-function fmtNum(n) {
-  if (n === null || n === undefined) return "N/A";
-  return String(n);
-}
-
-// finds token value no matter what key the API uses
-function getTokenValue(item) {
-  return (
-    item.value ??
-    item.tokenValue ??
-    item.tokens ??
-    item.valueTokens ??
-    item.rap ??
-    item.priceTokens ??
-    item.token_price ??
-    item.token_price_value ??
-    null
-  );
-}
-
-// finds tap price
-function getTapPrice(item) {
-  return (
-    item.price ??
-    item.tapPrice ??
-    item.taps ??
-    item.cost ??
-    null
-  );
-}
-
 function getItemName(item) {
   return item.name || item.itemName || item.displayName || item.petName || "Unknown";
 }
 
-// format trade ads offering/wanting arrays
-function formatTradeList(list) {
-  if (!list) return "N/A";
+function fmtNum(n) {
+  if (n === null || n === undefined) return "N/A";
+  if (typeof n === "object") return "N/A";
+  return String(n);
+}
 
-  if (typeof list === "string") return list;
+// Extract any numeric value even if nested inside objects
+function deepFindNumber(obj) {
+  if (obj === null || obj === undefined) return null;
+
+  if (typeof obj === "number") return obj;
+
+  if (typeof obj === "string") {
+    const parsed = Number(obj);
+    if (!isNaN(parsed)) return parsed;
+    return null;
+  }
+
+  if (Array.isArray(obj)) {
+    for (const x of obj) {
+      const found = deepFindNumber(x);
+      if (found !== null) return found;
+    }
+  }
+
+  if (typeof obj === "object") {
+    for (const v of Object.values(obj)) {
+      const found = deepFindNumber(v);
+      if (found !== null) return found;
+    }
+  }
+
+  return null;
+}
+
+function getTokenValue(item) {
+  return (
+    deepFindNumber(item.value) ??
+    deepFindNumber(item.tokenValue) ??
+    deepFindNumber(item.tokens) ??
+    deepFindNumber(item.valueTokens) ??
+    deepFindNumber(item.rap) ??
+    deepFindNumber(item.priceTokens) ??
+    deepFindNumber(item.price_tokens) ??
+    null
+  );
+}
+
+function getTapPrice(item) {
+  return (
+    deepFindNumber(item.price) ??
+    deepFindNumber(item.tapPrice) ??
+    deepFindNumber(item.taps) ??
+    deepFindNumber(item.cost) ??
+    null
+  );
+}
+
+function formatTradeList(list) {
+  if (!list) return "None";
 
   if (Array.isArray(list)) {
     if (list.length === 0) return "None";
 
     return list.map(x => {
-      if (typeof x === "string") return x;
-
-      const name = x.name || x.itemName || x.petName || "Unknown";
-      const amount = x.amount || x.qty || x.quantity || 1;
+      const name = x.name || x.itemName || x.petName || x.displayName || "Unknown";
+      const amount = deepFindNumber(x.amount) || deepFindNumber(x.qty) || deepFindNumber(x.quantity) || 1;
       return `${name} x${amount}`;
     }).join(", ");
   }
 
   if (typeof list === "object") {
-    const name = list.name || list.itemName || "Unknown";
-    const amount = list.amount || list.qty || list.quantity || 1;
+    const name = list.name || list.itemName || list.petName || list.displayName || "Unknown";
+    const amount = deepFindNumber(list.amount) || deepFindNumber(list.qty) || deepFindNumber(list.quantity) || 1;
     return `${name} x${amount}`;
   }
 
-  return "N/A";
+  return String(list);
+}
+
+function makeSearchLink(name) {
+  return `${WEBSITE_BASE}/items?search=${encodeURIComponent(name)}`;
+}
+
+function makePlazaSnipesLink() {
+  return `${WEBSITE_BASE}/plaza/snipes`;
 }
 
 // --------------------
@@ -141,7 +164,7 @@ function formatTradeList(list) {
 // --------------------
 const endpoints = {
   eggs: `${API_BASE}/eggs?sort=price&order=desc&limit=100`,
-  items: `${API_BASE}/items?sort=updated&order=desc&limit=400`,
+  items: `${API_BASE}/items?sort=updated&order=desc&limit=500`,
   topvalues: `${API_BASE}/items?type=Pet&sort=value&order=desc&page=1&limit=100`,
   enchants: `${API_BASE}/plaza/enchants`,
   snipes: `${API_BASE}/plaza/snipes?basis=value&maxPercent=80`,
@@ -170,9 +193,9 @@ client.on("messageCreate", async (message) => {
           "`!value <name>` — value lookup (TOKENS)",
           "`!search <name>` — search pets/items (TOKENS)",
           "`!topvalues` — top 10 values (TOKENS)",
-          "`!enchants` — enchants list",
-          "`!snipes` — plaza snipes",
-          "`!ads` — trade ads"
+          "`!enchants` — show enchants",
+          "`!snipes` — show snipes (includes link)",
+          "`!ads` — show trade ads"
         ].join("\n")
       )
       .setFooter({ text: "Source: tapsim.gg" });
@@ -226,11 +249,20 @@ client.on("messageCreate", async (message) => {
 
     const name = getItemName(found);
     const tokenValue = getTokenValue(found);
-    const exist = found.exist ?? found.exists ?? found.totalExist ?? "N/A";
+
+    const exist =
+      found.exist ??
+      found.exists ??
+      found.totalExist ??
+      found.total ??
+      "N/A";
 
     const embed = new EmbedBuilder()
       .setTitle(`💎 Value — ${name}`)
-      .setDescription(`Value: ${TOKEN_EMOJI} **${fmtNum(tokenValue)}**`)
+      .setDescription(
+        `Value: ${TOKEN_EMOJI} **${fmtNum(tokenValue)}**\n` +
+        `🔗 ${makeSearchLink(name)}`
+      )
       .addFields({ name: "Exist", value: String(exist), inline: true })
       .setFooter({ text: "Currency: TOKENS | tapsim.gg" });
 
@@ -261,7 +293,8 @@ client.on("messageCreate", async (message) => {
           const name = getItemName(m);
           const tokenValue = getTokenValue(m);
           return `**${name}** — ${TOKEN_EMOJI} **${fmtNum(tokenValue)}**`;
-        }).join("\n")
+        }).join("\n") +
+        `\n\n🔗 ${makeSearchLink(query)}`
       )
       .setFooter({ text: "Currency: TOKENS | tapsim.gg" });
 
@@ -328,11 +361,13 @@ client.on("messageCreate", async (message) => {
       .setDescription(
         top.map(s => {
           const name = getItemName(s);
-          const price = s.price ?? "N/A";
-          const percent = s.percent ?? s.percentOff ?? "N/A";
-          return `**${name}**\nPrice: ${TOKEN_EMOJI} **${fmtNum(price)}**\nPercent: **${percent}%**`;
+          const price = deepFindNumber(s.price) ?? "N/A";
+          const percent = deepFindNumber(s.percent) ?? deepFindNumber(s.percentOff) ?? "N/A";
+
+          return `**${name}**\nPrice: ${TOKEN_EMOJI} **${fmtNum(price)}**\nPercent: **${percent}%**\n🔗 ${makeSearchLink(name)}`;
         }).join("\n\n")
       )
+      .addFields({ name: "Plaza Snipes Page", value: makePlazaSnipesLink() })
       .setFooter({ text: "Currency: TOKENS | tapsim.gg" });
 
     return message.channel.send({ embeds: [embed] });
@@ -353,9 +388,14 @@ client.on("messageCreate", async (message) => {
         top.map(ad => {
           const offering = formatTradeList(ad.offering);
           const wanting = formatTradeList(ad.wanting);
-          const tokens = ad.tokens ?? ad.price ?? null;
 
-          return `**Offering:** ${offering}\n**Wanting:** ${wanting}${tokens ? `\n**Tokens:** ${TOKEN_EMOJI} ${fmtNum(tokens)}` : ""}`;
+          const tokenAmount =
+            deepFindNumber(ad.tokens) ??
+            deepFindNumber(ad.tokenAmount) ??
+            deepFindNumber(ad.price) ??
+            null;
+
+          return `**Offering:** ${offering}\n**Wanting:** ${wanting}\n**Tokens:** ${TOKEN_EMOJI} **${fmtNum(tokenAmount)}**`;
         }).join("\n\n")
       )
       .setFooter({ text: "Source: tapsim.gg" });
